@@ -17,6 +17,7 @@ import re # 문장 분리를 위해 re 임포트
 try:
     from database import init_db, load_user_data, save_user_data, get_all_user_ids
     import prompts
+    import config # <-- config.py 임포트
     print("DEBUG: database.py 및 prompts.py 임포트 성공.")
 except ImportError as e:
     print(f"오류: database.py 또는 prompts.py 임포트 실패! 파일이 존재하고 문법 오류가 없는지 확인하세요. 오류: {e}")
@@ -72,28 +73,24 @@ user_timer_tasks: Dict[int, asyncio.Task] = {}
 
 # --- 호감도 계산 함수 (비동기) ---
 async def calculate_likability(model, current_score, message_content):
-    """ Gemini를 사용하여 메시지 감성을 분석하고 새로운 호감도를 계산합니다. """
     print(f"DEBUG: calculate_likability 호출됨 - 현재 점수: {current_score}, 메시지: '{message_content[:20]}...'")
     new_score = current_score
     try:
-        # Generation Config (감성 분석용 - 짧은 답변 유도)
-        # genai_types 임포트 필요
-        generation_config_sentiment = genai_types.GenerationConfig(max_output_tokens=50, temperature=0.2)
+        generation_config_sentiment = genai_types.GenerationConfig(**config.SENTIMENT_GENERATION_CONFIG) # config 사용
         sentiment_prompt = prompts.SENTIMENT_ANALYSIS_PROMPT_TEMPLATE.format(user_message=message_content)
         print(f"DEBUG: 감성 분석 프롬프트 전송 시도")
-        sentiment_response = await model.generate_content_async(
-            sentiment_prompt,
-            generation_config=generation_config_sentiment # 생성 설정 전달
-        )
+        sentiment_response = await model.generate_content_async(sentiment_prompt, generation_config=generation_config_sentiment)
         if sentiment_response and sentiment_response.text:
             sentiment = sentiment_response.text.strip().upper()
             print(f"DEBUG: 감성 분석 결과: {sentiment}")
-            if sentiment == "POSITIVE": new_score += 2; print(f"DEBUG: 호감도 증가! (+2)")
-            elif sentiment == "NEGATIVE": new_score -= 1; print(f"DEBUG: 호감도 감소! (-1)")
+            # config 변수 사용
+            if sentiment == "POSITIVE": new_score += config.LIKABILITY_INCREASE_POSITIVE; print(f"DEBUG: 호감도 증가! (+{config.LIKABILITY_INCREASE_POSITIVE})")
+            elif sentiment == "NEGATIVE": new_score -= config.LIKABILITY_DECREASE_NEGATIVE; print(f"DEBUG: 호감도 감소! (-{config.LIKABILITY_DECREASE_NEGATIVE})")
             else: print(f"DEBUG: 호감도 변경 없음 (감성: {sentiment})")
         else: print(f"경고: 감성 분석 API 응답 비었음. 호감도 변경 없음.")
     except Exception as e: print(f"오류: 감성 분석 API 호출 중 오류 발생: {e}. 호감도 변경 없음.")
-    new_score = max(0, min(100, new_score)) # 예: 0~100점 제한
+    # config 변수 사용
+    new_score = max(config.MIN_LIKABILITY_SCORE, min(config.MAX_LIKABILITY_SCORE, new_score))
     print(f"DEBUG: calculate_likability 최종 결과 - 새 점수: {new_score}")
     return new_score
 
@@ -179,13 +176,12 @@ async def process_message_batch(user_id: int):
     if user_id in user_timer_tasks: del user_timer_tasks[user_id]; print(f"DEBUG: process_message_batch - 타이머 작업 최종 제거됨")
 
 
-# --- 요약 함수 정의 ---
-async def summarize_text(model, text_to_summarize, max_sentences=3):
-    """ Gemini를 사용하여 주어진 텍스트를 요약합니다. """
+# --- 요약 함수 정의 (config 사용) ---
+async def summarize_text(model, text_to_summarize):
     print(f"DEBUG: summarize_text 호출됨 - 요약 대상 (시작): '{text_to_summarize[:50]}...'")
     try:
         summary_prompt = prompts.SUMMARIZE_PROMPT_TEMPLATE.format(text_to_summarize=text_to_summarize)
-        generation_config_summary = genai_types.GenerationConfig(max_output_tokens=200)
+        generation_config_summary = genai_types.GenerationConfig(**config.SUMMARY_GENERATION_CONFIG) # config 사용
         summary_response = await model.generate_content_async(summary_prompt, generation_config=generation_config_summary)
         if summary_response and summary_response.text:
             summarized_text = summary_response.text.strip()
@@ -193,7 +189,6 @@ async def summarize_text(model, text_to_summarize, max_sentences=3):
             return summarized_text
         else: print(f"경고: 요약 API 응답 비었거나 문제 있음."); return None
     except Exception as e: print(f"오류: 요약 API 호출 중 오류 발생: {e}"); return None
-
 
 # --- 봇 이벤트 핸들러 ---
 @bot.event
@@ -234,8 +229,8 @@ async def on_message(message):
 
     async def delayed_process(uid):
         try:
-            await asyncio.sleep(20)
-            print(f"DEBUG: 20초 타이머 만료 - 사용자 ID: {uid}, 처리 함수 호출 시도.")
+            await asyncio.sleep(config.MESSAGE_BATCH_DELAY_SECONDS)
+            print(f"DEBUG: {config.MESSAGE_BATCH_DELAY_SECONDS}초 타이머 만료 - 사용자 ID: {uid}, 처리 함수 호출 시도.")
             await process_message_batch(uid)
         except asyncio.CancelledError: print(f"DEBUG: 타이머 작업 정상 취소됨 (새 메시지 수신) - 사용자 ID: {uid}")
         except Exception as e:
@@ -253,22 +248,20 @@ async def on_message(message):
     user_timer_tasks[user_id] = asyncio.create_task(delayed_process(user_id))
 
 
-# --- 선톡 보내는 백그라운드 작업 (요약 로직 추가됨) ---
-@tasks.loop(minutes=3) # 시간 간격 조절 가능
+# --- 선톡 보내는 백그라운드 작업 (랜덤 사용자 대상) ---
+@tasks.loop(minutes=config.PROACTIVE_DM_INTERVAL_MINUTES) # config 사용
 async def send_proactive_dm():
     print("DEBUG: 선톡 작업 실행됨.")
-    # 1. DB에서 모든 사용자 ID 목록 가져오기
-    all_user_ids = get_all_user_ids()
+    # 1. DB에서 모든 상호작용한 사용자 ID 목록 가져오기
+    all_user_ids = get_all_user_ids() # 새로 추가된 함수 호출
 
     if not all_user_ids:
-        print("DEBUG: 선톡 - 대화 기록이 있는 사용자가 없어 선톡을 건너<0xEB><0xA4>니다.")
-        return
+        print("DEBUG: 선톡 - 대화 기록이 있는 사용자가 없어 선톡을 건너뜁니다.")
+        return # 대상 없으면 종료
 
     # 2. 선톡 보낼 대상 랜덤 선택
-    # (주의: TARGET_USER_ID 환경 변수는 이제 이 작업에서 직접 사용되지 않음)
-    # (필요하다면 봇 관리자 ID 등 다른 용도로 사용 가능)
     try:
-        chosen_user_id = random.choice(all_user_ids)
+        chosen_user_id = random.choice(all_user_ids) # 목록에서 무작위 선택
         print(f"DEBUG: 선톡 - 총 {len(all_user_ids)}명 중 {chosen_user_id} 에게 선톡 시도.")
     except IndexError:
          print("DEBUG: 선톡 - 사용자 ID 목록이 비어있어 대상을 선택할 수 없음.")
@@ -276,37 +269,39 @@ async def send_proactive_dm():
 
     # 3. 선택된 사용자 정보 가져오기 및 선톡 보내기
     try:
-        user = await bot.fetch_user(chosen_user_id)
+        user = await bot.fetch_user(chosen_user_id) # 선택된 사용자 정보 가져오기
         if user:
             print(f"선톡 대상 확인: {user.name} ({chosen_user_id})")
-            target_user_history, target_user_likability = load_user_data(chosen_user_id) # 선택된 사용자의 데이터 로드
+            # ★★★ 선택된 사용자의 데이터 로드 ★★★
+            target_user_history, target_user_likability = load_user_data(chosen_user_id)
             print(f"DEBUG: 선톡 - 로드된 기록 (총 {len(target_user_history)} 턴), 호감도: {target_user_likability}")
 
             # Gemini 메시지 생성 요청 (선택된 사용자 대상)
             proactive_instruction = prompts.PROACTIVE_DM_PROMPT_TEMPLATE.format(user_display_name=user.display_name)
+            # ★★★ 선택된 사용자의 기록 사용 ★★★
             history_with_instruction = target_user_history.copy()
             history_with_instruction.append({'role': 'user', 'parts': [proactive_instruction]})
             print(f"DEBUG: 선톡 - Gemini에게 전달할 프롬프트(마지막 지시): {proactive_instruction}")
 
             message_to_send_full = random.choice(prompts.PROACTIVE_DM_FALLBACKS)
             generated_text = ""
-
             try:
                 print("DEBUG: 선톡 - 1단계: 전체 응답 생성 시도...")
-                response = await model.generate_content_async(history_with_instruction)
+                generation_config = genai_types.GenerationConfig(**config.DEFAULT_GENERATION_CONFIG) if config.DEFAULT_GENERATION_CONFIG else None
+                response = await model.generate_content_async(history_with_instruction, generation_config=generation_config)
                 if response and response.text: generated_text = response.text.strip(); message_to_send_full = generated_text; print(f"Gemini 생성 메시지 (선톡, 전체): {message_to_send_full[:100]}...")
                 else: print(f"경고: Gemini 응답 비었거나 차단됨. 기본 메시지 사용.")
             except Exception as e: print(f"오류: Gemini 메시지 생성 중 오류 발생 - {e}")
 
-            # 길이 확인 및 필요시 요약 (이전 로직 유지)
+            # 길이 확인 및 필요시 요약
             final_text_to_send = message_to_send_full
             sentences = re.split(r'(?<=[.?!])\s+', message_to_send_full)
-            if len(sentences) > 3:
+            if len(sentences) > config.SUMMARY_MAX_SENTENCES:
                 print(f"DEBUG: 선톡 - 답변이 {len(sentences)} 문장으로 길어서 요약 시도...")
-                summarized_text = await summarize_text(model, message_to_send_full) # 요약 함수 호출
+                summarized_text = await summarize_text(model, message_to_send_full)
                 if summarized_text: final_text_to_send = summarized_text
-                else: print("경고: 선톡 요약 실패. 원본 답변의 첫 3문장 사용."); final_text_to_send = " ".join(sentences[:3])
-            else: print("DEBUG: 선톡 - 답변이 3문장 이하이므로 원본 사용.")
+                else: print("경고: 선톡 요약 실패. 원본 첫 {} 문장 사용.".format(config.SUMMARY_MAX_SENTENCES)); final_text_to_send = " ".join(sentences[:config.SUMMARY_MAX_SENTENCES])
+            else: print(f"DEBUG: 선톡 - 답변이 {config.SUMMARY_MAX_SENTENCES} 문장 이하이므로 원본 사용.")
 
             # DM 발송 및 DB 기록 (선택된 사용자에게)
             print(f"선톡 시도 -> User ID: {chosen_user_id}, 메시지 (최종): {final_text_to_send[:100]}...")
@@ -316,7 +311,7 @@ async def send_proactive_dm():
                      sentence = sentence.strip()
                      if sentence: await user.send(sentence); await asyncio.sleep(random.uniform(1.0, 2.0))
                  print(f"선톡 성공 (분할 전송 완료) -> User ID: {chosen_user_id}")
-                 # DB 저장 (선택된 사용자의 기록에 저장)
+                 # ★★★ 선택된 사용자의 DB에 저장 ★★★
                  final_history_to_save = target_user_history
                  final_history_to_save.append({'role': 'model', 'parts': [message_to_send_full]}) # 원본 전체 저장
                  save_user_data(chosen_user_id, final_history_to_save, target_user_likability) # <-- 선택된 사용자 ID 사용
@@ -328,8 +323,8 @@ async def send_proactive_dm():
     except discord.Forbidden: print(f"오류: 선톡 대상 사용자에게 DM을 보낼 권한이 없습니다 (ID: {chosen_user_id})")
     except Exception as e: print(f"선톡 대상 처리 중 예외 발생 (User ID: {chosen_user_id}): {e}")
 
-except Exception as e: # 랜덤 선택 등에서 오류 발생 시
-     print(f"선톡 작업 중 예외 발생 (대상 선택 이전): {e}")
+    except Exception as e: # 대상 선택 이전 오류
+        print(f"선톡 작업 중 예외 발생 (대상 선택 이전): {e}")
 
 
 @send_proactive_dm.before_loop
