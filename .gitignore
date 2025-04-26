@@ -1,0 +1,23 @@
+# Environments
+.env
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# VS Code settings
+.vscode/
+
+# macOS cache files
+.DS_Store
+
+# Replit cache/config (if using Replit later)
+.replit
+venv/
+*.upm/
