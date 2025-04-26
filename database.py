@@ -104,3 +104,21 @@ def save_user_data(user_id, history_list, likability_score):
     except TypeError as e: print(f"사용자 {user_id} 기록 JSON 변환 중 오류 발생 (TypeError): {e}"); print(f"DEBUG: 저장 실패 데이터 (마지막 3개 턴): {history_list[-3:]}")
     finally:
         if conn: conn.close()
+
+def get_all_user_ids():
+    """DB에 저장된 모든 사용자의 ID 목록을 반환합니다."""
+    conn = get_db_connection()
+    if conn is None: return []
+    user_ids = []
+    try:
+        with conn:
+            with conn.cursor() as cursor:
+                cursor.execute("SELECT user_id FROM conversations")
+                results = cursor.fetchall()
+                user_ids = [row[0] for row in results]
+                print(f"DEBUG: get_all_user_ids - {len(user_ids)} 명의 사용자 ID 로드됨.")
+    except psycopg2.Error as e:
+        print(f"모든 사용자 ID 로드 중 오류 발생: {e}")
+    finally:
+        if conn: conn.close()
+    return user_ids

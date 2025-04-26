@@ -15,7 +15,7 @@ import re # 문장 분리를 위해 re 임포트
 
 # --- 다른 .py 파일에서 함수 및 변수 가져오기 ---
 try:
-    from database import init_db, load_user_data, save_user_data
+    from database import init_db, load_user_data, save_user_data, get_all_user_ids
     import prompts
     print("DEBUG: database.py 및 prompts.py 임포트 성공.")
 except ImportError as e:
@@ -254,14 +254,35 @@ async def on_message(message):
 
 
 # --- 선톡 보내는 백그라운드 작업 (요약 로직 추가됨) ---
-@tasks.loop(minutes=30)
+@tasks.loop(minutes=3) # 시간 간격 조절 가능
 async def send_proactive_dm():
+    print("DEBUG: 선톡 작업 실행됨.")
+    # 1. DB에서 모든 사용자 ID 목록 가져오기
+    all_user_ids = get_all_user_ids()
+
+    if not all_user_ids:
+        print("DEBUG: 선톡 - 대화 기록이 있는 사용자가 없어 선톡을 건너<0xEB><0xA4>니다.")
+        return
+
+    # 2. 선톡 보낼 대상 랜덤 선택
+    # (주의: TARGET_USER_ID 환경 변수는 이제 이 작업에서 직접 사용되지 않음)
+    # (필요하다면 봇 관리자 ID 등 다른 용도로 사용 가능)
     try:
-        user = await bot.fetch_user(TARGET_USER_ID)
+        chosen_user_id = random.choice(all_user_ids)
+        print(f"DEBUG: 선톡 - 총 {len(all_user_ids)}명 중 {chosen_user_id} 에게 선톡 시도.")
+    except IndexError:
+         print("DEBUG: 선톡 - 사용자 ID 목록이 비어있어 대상을 선택할 수 없음.")
+         return
+
+    # 3. 선택된 사용자 정보 가져오기 및 선톡 보내기
+    try:
+        user = await bot.fetch_user(chosen_user_id)
         if user:
-            print(f"선톡 대상 확인: {user.name} ({TARGET_USER_ID})")
-            target_user_history, target_user_likability = load_user_data(TARGET_USER_ID)
-            print(f"DEBUG: 선톡 - 로드됨 -> 기록 (총 {len(target_user_history)} 턴), 호감도: {target_user_likability}")
+            print(f"선톡 대상 확인: {user.name} ({chosen_user_id})")
+            target_user_history, target_user_likability = load_user_data(chosen_user_id) # 선택된 사용자의 데이터 로드
+            print(f"DEBUG: 선톡 - 로드된 기록 (총 {len(target_user_history)} 턴), 호감도: {target_user_likability}")
+
+            # Gemini 메시지 생성 요청 (선택된 사용자 대상)
             proactive_instruction = prompts.PROACTIVE_DM_PROMPT_TEMPLATE.format(user_display_name=user.display_name)
             history_with_instruction = target_user_history.copy()
             history_with_instruction.append({'role': 'user', 'parts': [proactive_instruction]})
@@ -277,32 +298,38 @@ async def send_proactive_dm():
                 else: print(f"경고: Gemini 응답 비었거나 차단됨. 기본 메시지 사용.")
             except Exception as e: print(f"오류: Gemini 메시지 생성 중 오류 발생 - {e}")
 
-            # 2단계: 길이 확인 및 필요시 요약
+            # 길이 확인 및 필요시 요약 (이전 로직 유지)
             final_text_to_send = message_to_send_full
             sentences = re.split(r'(?<=[.?!])\s+', message_to_send_full)
             if len(sentences) > 3:
                 print(f"DEBUG: 선톡 - 답변이 {len(sentences)} 문장으로 길어서 요약 시도...")
-                summarized_text = await summarize_text(model, message_to_send_full)
+                summarized_text = await summarize_text(model, message_to_send_full) # 요약 함수 호출
                 if summarized_text: final_text_to_send = summarized_text
                 else: print("경고: 선톡 요약 실패. 원본 답변의 첫 3문장 사용."); final_text_to_send = " ".join(sentences[:3])
             else: print("DEBUG: 선톡 - 답변이 3문장 이하이므로 원본 사용.")
 
-            # 3단계: 최종 텍스트 분할 전송 및 DB 저장
-            print(f"선톡 시도 -> User ID: {TARGET_USER_ID}, 메시지 (최종): {final_text_to_send[:100]}...")
+            # DM 발송 및 DB 기록 (선택된 사용자에게)
+            print(f"선톡 시도 -> User ID: {chosen_user_id}, 메시지 (최종): {final_text_to_send[:100]}...")
             if final_text_to_send:
                  final_sentences = re.split(r'(?<=[.?!])\s+', final_text_to_send)
                  for sentence in final_sentences:
                      sentence = sentence.strip()
                      if sentence: await user.send(sentence); await asyncio.sleep(random.uniform(1.0, 2.0))
-                 print(f"선톡 성공 (분할 전송 완료) -> User ID: {TARGET_USER_ID}")
+                 print(f"선톡 성공 (분할 전송 완료) -> User ID: {chosen_user_id}")
+                 # DB 저장 (선택된 사용자의 기록에 저장)
                  final_history_to_save = target_user_history
                  final_history_to_save.append({'role': 'model', 'parts': [message_to_send_full]}) # 원본 전체 저장
-                 save_user_data(TARGET_USER_ID, final_history_to_save, target_user_likability)
-                 print(f"선톡 내용(원본) DB 저장 완료 -> User ID: {TARGET_USER_ID}, 호감도: {target_user_likability}")
+                 save_user_data(chosen_user_id, final_history_to_save, target_user_likability) # <-- 선택된 사용자 ID 사용
+                 print(f"선톡 내용(원본) DB 저장 완료 -> User ID: {chosen_user_id}, 호감도: {target_user_likability}")
             else: print(f"경고: 최종적으로 보낼 메시지가 없습니다.")
-    except discord.NotFound: print(f"오류: 선톡 대상 사용자를 찾을 수 없습니다 (ID: {TARGET_USER_ID})")
-    except discord.Forbidden: print(f"오류: 선톡 대상 사용자에게 DM을 보낼 권한이 없습니다 (ID: {TARGET_USER_ID})")
-    except Exception as e: print(f"선톡 작업 중 예외 발생: {e}")
+
+    # --- 나머지 예외 처리 ---
+    except discord.NotFound: print(f"오류: 선톡 대상 사용자를 찾을 수 없습니다 (ID: {chosen_user_id})")
+    except discord.Forbidden: print(f"오류: 선톡 대상 사용자에게 DM을 보낼 권한이 없습니다 (ID: {chosen_user_id})")
+    except Exception as e: print(f"선톡 대상 처리 중 예외 발생 (User ID: {chosen_user_id}): {e}")
+
+except Exception as e: # 랜덤 선택 등에서 오류 발생 시
+     print(f"선톡 작업 중 예외 발생 (대상 선택 이전): {e}")
 
 
 @send_proactive_dm.before_loop
