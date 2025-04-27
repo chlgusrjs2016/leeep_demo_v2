@@ -5,7 +5,7 @@
 MESSAGE_BATCH_DELAY_SECONDS = 8 # 메시지 묶음 처리 대기 시간 (초)
 
 # --- 선톡(proactive DM) 관련 설정 ---
-PROACTIVE_DM_INTERVAL_MINUTES = 30 # 선톡 발송 주기 (분)
+PROACTIVE_DM_INTERVAL_MINUTES = 2 # 선톡 발송 주기 (분)
 
 # --- 호감도 관련 설정 ---
 DEFAULT_LIKABILITY_SCORE = 30 # 최초 호감도 점수 (30점으로 변경)
